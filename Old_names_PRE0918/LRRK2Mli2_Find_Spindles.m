@@ -1,0 +1,330 @@
+function [Spindle]=LRRK2Mli2_Find_Spindles(lowerthresh_std, upperthresh_std,lowlimit_fq,highlimit_fq, eeg_chan, plot_it)
+
+%     if nargin<6
+%         plot_it=false;
+%     end
+%     if nargin<5
+%        f=find_files('*ECoG_Left_Mid*');
+%        if isempty(f)
+%            return
+%        end
+%
+
+Spindle.aborted=0;
+
+lowlimit_fq  = 8; %This is in litterature and then later I can say actually i just want 8-14 Hz or so
+highlimit_fq = 16;
+upperthresh_std=4.5;
+lowerthresh_std=1.8;
+plot_it=false;
+
+eeg_chan=find_files('*ECoG_Left_Mid*');
+if isempty(eeg_chan)
+    eeg_chan=find_files('*ECoG_Left_Post*');
+    if isempty(eeg_chan)
+        Spindle.aborted=1;
+        return
+    end
+
+end
+
+% eeg_chan=load(f{1});
+mindur=0.45;
+maxdur=1.5;
+% plot_it=true;
+%
+% lowlimit_fq  = 6; %This is in litterature and then later I can say actually i just want 8-14 Hz or so
+% highlimit_fq = 16;
+% upperthresh_std=4.5;
+% lowerthresh_std=1.3;
+%Goal is to auto-detect spindles, grab their times and be able to plot them
+%along with power and spectrogram then decide are they spindles yes or no
+%and pull out data about their properties to refine process and get some
+%measures to compare between groups
+
+%inputs/needed:
+%Sleep Times
+%re-referenced ECOG
+%Spindle properties to use for detection
+
+
+%Some values for the detection later
+spin_min_duration_sec = 0.4; %.4s %in samples, at 200Hz
+%spin_max_duration = 4000; %2s %maybe do this post-hoc
+spin_minimum_inter_interval_period_sec = []; %300ms
+% Values taken from Characterization of Topographically
+% Specific Sleep Spindles in Mice by Kim et al. 2014
+ spec_freqs = 2:.25:20; %parameters for the PSDs
+
+%get basic variables out of the way
+direct=strsplit(pwd,'\');
+mouseday=direct{end};
+load('Session_Info.mat');
+
+%mainsignal could be a function input
+ main_signal=eeg_chan{1};
+LFP=load(eeg_chan{1});
+
+ff=find_files('*Reref.mat');
+% if isempty(ff)
+%     [ReRef]=LRRK2MLi2_Rereference;
+% else
+if isempty(ff)
+    Spindle.aborted=1;
+    return
+end
+load(ff{1})
+% end
+%what side you will use as reref depends on what side you have
+bits=strsplit(main_signal,'-');
+location=bits{2};
+if contains(location,'Left')==1
+    Ref=ReRef.Allright;
+end
+if contains(location,'Right')==1
+    Ref=ReRef.Allleft;
+end
+
+
+ECOG(:,1)=LFP.LFP_uV(:,1);
+ECOG(:,2)=LFP.LFP_uV(:,2)-Ref(:,2);
+
+assert(isequal(LFP.LFP_uV(:,1),Ref(:,1)),'Time Stamps not equal')
+
+
+%% Filter/Power
+% Kim et al. PNAS bandpass-filtered from 7 to 15
+%first find power across the whole signal, then restrict analysis to just
+%sleep periods (for mean standard deviation etc.  Stephen says make this
+%for pre sleep only
+
+d = designfilt('bandpassiir','FilterOrder',10, ...
+    'HalfPowerFrequency1',lowlimit_fq,'HalfPowerFrequency2',highlimit_fq, ...
+    'SampleRate',LFP.fs_final,'DesignMethod','butter');
+%%% filter type
+% freqz(d,[],LFP.fs_final)
+filt_sig = filtfilt(d,double(ECOG(:,2))); %filtered to spindle band
+as=abs(hilbert(filt_sig));
+% power=envelope_cowen(as.^2);
+%  envpower=convn(as.^2,hanning(round(LFP.fs_final*.1)),'same'); %% hanning might be increasing power- doesnt sum to 1 divide by sum of hanning
+smoothed_power(:,1)=ECOG(:,1);
+hanwin=hanning(round(LFP.fs_final*.2)); %raising this to .2 to see if it will make the envelope less up and down-y
+smoothed_power(:,2)=convn(as.^2,hanwin/sum(hanwin),'same'); %% hanning might be increasing power- doesnt sum to 1 divide by sum of hanning
+%here I divide by the sum of the window
+
+% smoothed_power(:,2)=envelope_cowen(envpower); %possibly oversmoothing!!!!!
+%now you have smoothed power as a time series with time in first col
+%% Concatinate the Power for the sleep intevals of PRE sleep
+SleepPeriods.Pre=load([mouseday '-Sleep_Times_Pre.mat']);
+SleepPeriods.Post=load([mouseday '-Sleep_Times_Post.mat']);
+
+
+SleepPower=zeros(1,2);
+for isleep=1:Rows(SleepPeriods.Pre.Actual_Sleep_Times_Pre)
+    SleepIntervalIX= smoothed_power(:,1)> SleepPeriods.Pre.Actual_Sleep_Times_Pre(isleep,1) & smoothed_power(:,1)< SleepPeriods.Pre.Actual_Sleep_Times_Pre(isleep,2);
+    SleepPower=[SleepPower ; smoothed_power(SleepIntervalIX,:)];
+end
+% only if you want to include post in your calculation
+% for isleep=1:Rows(SleepPeriods.Post.Actual_Sleep_Times_Post)
+%     SleepIntervalIX= smoothed_power(:,1)> SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,1) & smoothed_power(:,1)< SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,2);
+%     SleepPower=[SleepPower ; smoothed_power(SleepIntervalIX,:)];
+% end
+
+maxpow = prctile(SleepPower(:,2),99);
+minpow = prctile(SleepPower(:,2),1);
+
+trimmedpowerIX=SleepPower(:,2)>minpow & SleepPower(:,2)<maxpow;
+
+powstd=std(SleepPower(trimmedpowerIX,2));
+mean_power=mean(SleepPower(trimmedpowerIX,2));
+
+%% Thresholding JP did - spindle has to be between 1 and 3 stds, This can be adjusted as you see fit
+lower_spin_thresh = mean_power + powstd*lowerthresh_std; %these will be in standard deviations
+upper_spin_thresh = mean_power + powstd*upperthresh_std;
+
+count1=0;
+for isleep=1:Rows(SleepPeriods.Pre.Actual_Sleep_Times_Pre)
+    %or post
+    SleepIX=ECOG(:,1)>SleepPeriods.Pre.Actual_Sleep_Times_Pre(isleep,1) & ECOG(:,1)<SleepPeriods.Pre.Actual_Sleep_Times_Pre(isleep,2);
+    %     SleepIX=ECOG(:,1)>SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,1) & ECOG(:,1)<SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,2);
+    
+    %     figure
+    %     plot(smoothed_power(SleepIX,1),smoothed_power(SleepIX,2))
+    %     %     refline(0,upper_spin_thresh)
+    %     %     refline(0,lower_spin_thresh)
+    %     refline(0,lower_spin_thresh)
+    %     refline(0,upper_spin_thresh)
+    
+    [spin_above_times, ~] = find_intervals(smoothed_power(SleepIX,:), upper_spin_thresh, lower_spin_thresh, ...
+        spin_min_duration_sec, spin_minimum_inter_interval_period_sec);
+    
+    if ~isempty(spin_above_times)
+        %     sigmatimes{isleep}=spin_above_times;
+        
+        for ispin= 1:Rows(spin_above_times)
+            spinintervalIX=ECOG(:,1)>spin_above_times(ispin,1) & ECOG(:,1)<spin_above_times(ispin,2);
+            putative_spindle=ECOG(spinintervalIX,:);
+            plotinterval=ECOG(:,1)> spin_above_times(ispin,1)-1 & ECOG(:,1)<spin_above_times(ispin,2)+1;
+            
+            [pxx,frex]= pburg(double(ECOG(spinintervalIX,2)),40,spec_freqs,LFP.fs_final);
+            %             [pks,locs]=findpeaks(pxx,frex); % I think locs are now in frequency
+            [m ix]=max(pxx); % I think locs are now in frequency
+            peakfrex= frex(ix);
+            
+            if peakfrex>16 || peakfrex<6.5 %make sure peak it where you want it
+                continue
+            end
+            
+            spinlength=spin_above_times(ispin,2)-spin_above_times(ispin,1);
+            if spinlength<mindur ||spinlength>maxdur
+                continue
+            end
+            if max(putative_spindle(:,2)) > 500 ||  min(putative_spindle(:,2)) < -500
+                continue
+            end
+            count1=count1+1;
+            if plot_it==true
+                figure
+                subplot(4,1,1)
+                yyaxis left
+                plot(ECOG(plotinterval,1),ECOG(plotinterval,2),'k')
+                hold on
+                plot(ECOG(plotinterval,1),filt_sig(plotinterval),'b')
+                vline(min(ECOG(spinintervalIX,1)))
+                vline(max(ECOG(spinintervalIX,1)))
+                axis tight
+                
+                yyaxis right
+                plot(smoothed_power(plotinterval,1),smoothed_power(plotinterval,2),'r')  % now 1= 1 second and this should be easy to estimate Hz from
+                
+                refline(0,lower_spin_thresh)
+                refline(0,upper_spin_thresh)
+                
+                ylabel('uV')
+                xlabel('Time(s)')
+                title(sprintf('Duration %2.2f secs %1.1f frex',spinlength,peakfrex))
+                
+                subplot(4,1,2)
+                Spectrogram_spindle_LC(ECOG(plotinterval,2), LFP.fs_final, 3:0.2:20, 'wavelet');
+                
+                subplot(4,1,3)
+                    pwelch(ECOG(spinintervalIX,2),sum(spinintervalIX),[],spec_freqs,LFP.fs_final);
+                    
+                 subplot(4,1,3)
+                    pburg(double(ECOG(spinintervalIX,2)),40,spec_freqs,LFP.fs_final);
+                
+                
+            end
+            %Meta data for PRE Sleep
+            Spindle.Pre(count1).raw_spin= putative_spindle;
+            Spindle.Pre(count1).length_spin_sec=spinlength;
+            Spindle.Pre(count1).filt_sig=filt_sig(spinintervalIX,1);
+            Spindle.Pre(count1).mean_sig_pow=mean(smoothed_power(spinintervalIX,2));
+            Spindle.Pre(count1).time=ECOG(spinintervalIX,1);
+            Spindle.Pre(count1).values=ECOG(spinintervalIX,2);
+            Spindle.Pre(count1).peakfrex=peakfrex;
+            Spindle.Pre(count1).DayType=Session_Info.RecordingType{1};
+            Spindle.Pre(count1).Mouse=mouseday(1:3);
+            Spindle.Pre(count1).Day=Session_Info.Recordingday;
+            ixx=Session_Info.drugs.Mouse==mouseday(1:3);
+            Spindle.Pre(count1).drugmouse=Session_Info.drugs.GotDrug(ixx);
+            Spindle.Pre(count1).MouseType=mouseday(1);
+            Spindle.Pre(count1).SleepSession='Pre';
+            Spindle.Pre(count1).psd=pxx;
+            Spindle.Pre(count1).psd_frex=frex;
+            Spindle.Pre(count1).location=bits{2};
+        end
+        
+    end
+end
+%now for post sleep
+%%
+count2=0;
+for isleep=1:Rows(SleepPeriods.Post.Actual_Sleep_Times_Post)
+    %or post
+    SleepIX=ECOG(:,1)>SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,1) & ECOG(:,1)<SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,2);
+    %     SleepIX=ECOG(:,1)>SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,1) & ECOG(:,1)<SleepPeriods.Post.Actual_Sleep_Times_Post(isleep,2);
+    %
+    %     figure
+    %     plot(smoothed_power(SleepIX,1),smoothed_power(SleepIX,2))
+    %     refline(0,upper_spin_thresh)
+    %     refline(0,lower_spin_thresh)
+    
+    
+    [spin_above_times, ~] = find_intervals(smoothed_power(SleepIX,:), upper_spin_thresh, lower_spin_thresh, ...
+        spin_min_duration_sec, spin_minimum_inter_interval_period_sec);
+    
+    if ~isempty(spin_above_times)
+        %     sigmatimes{isleep}=spin_above_times;
+        
+        for ispin= 1:Rows(spin_above_times)
+            spinintervalIX=ECOG(:,1)>spin_above_times(ispin,1) & ECOG(:,1)<spin_above_times(ispin,2);
+            putative_spindle=ECOG(spinintervalIX,:);
+            plotinterval=ECOG(:,1)> spin_above_times(ispin,1)-1 & ECOG(:,1)<spin_above_times(ispin,2)+1;
+            [pxx,frex]= pburg(double(ECOG(spinintervalIX,2)),40,spec_freqs,LFP.fs_final);
+            [m, ix]=max(pxx); % I think locs are now in frequency
+            peakfrex= frex(ix);
+            
+            if peakfrex>16 || peakfrex<6.5  %make sure peak it where you want it
+                continue
+            end
+            
+            spinlength=spin_above_times(ispin,2)-spin_above_times(ispin,1);
+            if spinlength<mindur ||spinlength>maxdur 
+                continue
+            end
+            count2=count2+1;
+            if plot_it==true
+                figure
+                subplot(4,1,1)
+                yyaxis left
+                plot(ECOG(plotinterval,1),ECOG(plotinterval,2),'k')
+                hold on
+                plot(ECOG(plotinterval,1),filt_sig(plotinterval),'b')
+                vline(min(ECOG(spinintervalIX,1)))
+                vline(max(ECOG(spinintervalIX,1)))
+                axis tight
+                
+                yyaxis right
+                plot(smoothed_power(plotinterval,1),smoothed_power(plotinterval,2),'r')  % now 1= 1 second and this should be easy to estimate Hz from
+                
+                refline(0,lower_spin_thresh)
+                refline(0,upper_spin_thresh)
+                
+                ylabel('uV')
+                xlabel('Time(s)')
+                title(sprintf('Duration %2.2f secs %1.1f frex',spinlength,peakfrex))
+                
+                subplot(4,1,2)
+                Spectrogram_spindle_LC(ECOG(plotinterval,2), LFP.fs_final, 3:0.2:20, 'wavelet');
+                
+               subplot(4,1,3)
+                    pwelch(ECOG(spinintervalIX,2),sum(spinintervalIX),[],spec_freqs,LFP.fs_final);
+                 subplot(4,1,4)
+                    pburg(double(ECOG(spinintervalIX,2)),40,spec_freqs,LFP.fs_final);
+                
+            end
+            
+            
+            Spindle.Post(count2).raw_spin= putative_spindle;
+            Spindle.Post(count2).length_spin_sec=spinlength;
+            Spindle.Post(count2).filt_sig=filt_sig(spinintervalIX,1);
+            Spindle.Post(count2).mean_sig_pow=mean(smoothed_power(spinintervalIX,2));
+            Spindle.Post(count2).time=ECOG(spinintervalIX,1);
+            Spindle.Post(count2).values=ECOG(spinintervalIX,2);
+            Spindle.Post(count2).peakfrex=peakfrex;
+            Spindle.Post(count2).DayType=Session_Info.RecordingType{1};
+            Spindle.Post(count2).Mouse=mouseday(1:3);
+            Spindle.Post(count2).Day=Session_Info.Recordingday;
+            ixx=Session_Info.drugs.Mouse==mouseday(1:3);
+            Spindle.Post(count2).drugmouse=Session_Info.drugs.GotDrug(ixx);
+            Spindle.Post(count2).MouseType=mouseday(1);
+            Spindle.Post(count2).SleepSession='Post';
+            Spindle.Post(count2).psd=pxx;
+            Spindle.Post(count2).psd_frex=frex;
+            Spindle.Post(count2).location=bits{2};
+        end
+    end
+end
+
+

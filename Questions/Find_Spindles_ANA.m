@@ -1,0 +1,112 @@
+% LRRK2Mli2_Find_Spindles_ANA
+
+% YOU DEF WANNA PUT A MINIMUM SPINDLE NUMBER FOR A SLEEP PERIOD TO ANALYZE
+% IT
+%%
+ANA_dir='E:\Lindsey\LRRK2_MLi2\Analysis_Results\Questions\LRRK2Mli2_Find_Spindles'
+alldirs=dir(fullfile(ANA_dir,'*.mat'));
+cd(ANA_dir)
+MT = table();
+A= [];
+count=1;
+for ises=1:length(alldirs)
+    Dset=load(fullfile(ANA_dir,alldirs(ises).name));
+    if Dset.Dset(1).aborted==1 || isempty(Dset.Dset)
+        continue
+    end
+    if ~isfield(Dset.Dset,'Pre')
+        continue
+    end
+    A(count).ses_count = ises;
+    A(count).Premean_sig_pow = mean([Dset.Dset.Pre.mean_sig_pow]); %right now going to do stuff on second col but changed in regular script so next time will only be a vector
+    A(count).Prelength_spin_sec = mean([Dset.Dset.Pre.length_spin_sec]);
+    A(count).Prefrex = mean([Dset.Dset.Pre.peakfrex]);
+    A(count).MouseType = Dset.Dset.Pre.MouseType;
+    A(count).MouseName = Dset.Dset.Pre.Mouse;
+%     A(count).Pre.SleepSession = Dset.Dset.Pre.SleepSession;
+    A(count).Predrugmouse = Dset.Dset.Pre.drugmouse;
+%     A(count).Pre.time=Dset.Dset.Pre.time;
+%     A(count).Pre.values=Dset.Dset.Pre.values;
+    A(count).PreDayType=Dset.Dset.Pre.DayType;
+    
+    if ~isfield(Dset.Dset,'Post')
+        continue
+    end
+    A(count).Postmean_sig_pow = mean([Dset.Dset.Post.mean_sig_pow]); %right now going to do stuff on second col but changed in regular script so next time will only be a vector
+    A(count).Postlength_spin_sec = mean([Dset.Dset.Post.length_spin_sec]);
+    A(count).Postfrex = mean([Dset.Dset.Post.peakfrex]);
+    A(count).MouseType = Dset.Dset.Post.MouseType;
+    A(count).MouseName = Dset.Dset.Post.Mouse;
+%     A(count).Post.SleepSession = Dset.Dset.Post.SleepSession;
+    A(count).Postdrugmouse = Dset.Dset.Post.drugmouse;
+%     A(count).Post.time=Dset.Dset.Post.time;
+%     A(count).Post.values=Dset.Dset.Post.values;
+    A(count).PostDayType=Dset.Dset.Post.DayType;
+    
+    
+    count=count+1;
+end
+%%
+MT = struct2table(A);
+MT.MouseName=categorical(MT.MouseName);
+MT.MouseType=categorical(MT.MouseType);
+MT.TypeDay=categorical(MT.PostDayType);
+% MT = removevars(MT, 'PostDayType');
+% MT = removevars(MT, 'PreDayType');
+MT.DrugMouse=MT.Predrugmouse;
+
+% MT.SleepSession=categorical(MT.SleepSession);
+%% Percentage of Time Sleeping- since we grab 100 min, this will be total time asleep pre
+
+dsa = MT(:,{'MouseName','MouseType','Prefrex'});
+ByName = grpstats(dsa,{'MouseName','MouseType'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot(ByName.mean_Prefrex,ByName.MouseType);
+figure
+Error_bars(data_matrix)
+[h,p, ci, stats] = ttest2(data_matrix(:,1),data_matrix(~isnan(data_matrix(:,2)),2))
+%%
+MT.Diffrex= MT.Postfrex-MT.Prefrex;
+dsa = MT(:,{'MouseName','MouseType','TypeDay','Diffrex'});
+ByName = grpstats(dsa,{'MouseName','MouseType','TypeDay'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot4things(variable,ByName.MouseType,ByName.TypeDay)
+
+figure
+Error_bars(data_matrix)
+%%
+
+dsa = MT(:,{'MouseName','MouseType','Prelength_spin_sec'});
+ByName = grpstats(dsa,{'MouseName','MouseType'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot(ByName.mean_Prelength_spin_sec,ByName.MouseType);
+
+figure
+Error_bars(data_matrix)
+%%
+dsa = MT(:,{'MouseName','MouseType','Premean_sig_pow'});
+ByName = grpstats(dsa,{'MouseName','MouseType'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot(ByName.mean_Premean_sig_pow,ByName.MouseType);
+
+figure
+Error_bars(data_matrix)
+%%
+MT.Diffpow= MT.Postmean_sig_pow-MT.Premean_sig_pow;
+dsa = MT(:,{'MouseName','MouseType','TypeDay','Diffpow'});
+ByName = grpstats(dsa,{'MouseName','MouseType','TypeDay'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot4things(ByName.mean_Diffpow,ByName.MouseType,ByName.TypeDay)
+
+figure
+Error_bars(data_matrix)
+
+%%
+MT.Difflength= MT.Postlength_spin_sec-MT.Prelength_spin_sec;
+dsa = MT(:,{'MouseName','MouseType','TypeDay','Difflength'});
+ByName = grpstats(dsa,{'MouseName','MouseType','TypeDay'});
+% With this table made, now move to plot it
+[data_matrix]=table2barplot4things(ByName.mean_Difflength,ByName.MouseType,ByName.TypeDay)
+
+figure
+Error_bars(data_matrix)
